@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sys_package_dependency_m2m">
+    <sys_package_dependency_m2m action="INSERT_OR_UPDATE">
+        <dependency display_value="Incident" source="com.snc.incident">d7af2176f1f322108bb2efdbde054cb3</dependency>
+        <min_version>1.0.0</min_version>
+        <sys_created_by>admin</sys_created_by>
+        <sys_created_on>2026-01-12 03:05:58</sys_created_on>
+        <sys_id>b7c25d878392321010fac7e0deaad325</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_package display_value="Asiapac IT Bot" source="x_1894676_asiapa_0">da15edbd8392f61010fac7e0deaad3fe</sys_package>
+        <sys_updated_by>admin</sys_updated_by>
+        <sys_updated_on>2026-01-12 03:05:58</sys_updated_on>
+    </sys_package_dependency_m2m>
+</record_update>
