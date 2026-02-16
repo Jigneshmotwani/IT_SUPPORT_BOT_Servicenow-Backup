@@ -1,0 +1,422 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sys_ws_operation">
+    <sys_ws_operation action="INSERT_OR_UPDATE">
+        <active>true</active>
+        <consumes>application/json,application/xml,text/xml</consumes>
+        <consumes_customized>false</consumes_customized>
+        <default_operation_uri/>
+        <enforce_acl/>
+        <http_method>PATCH</http_method>
+        <name>Update Incident</name>
+        <operation_script><![CDATA[
+
+// ============================================================================
+// RESOURCE 3: UPDATE Incident (PATCH)
+// ============================================================================
+// HTTP Method: PATCH
+// Relative Path: /incident/{case_id}
+// Full URL: https://YOUR_INSTANCE.service-now.com/api/x_1894676_asiapa_0/it_bot/incident/INC0010018
+// ============================================================================
+
+(function process(/*RESTAPIRequest*/ request, /*RESTAPIResponse*/ response) {
+    try {
+
+        /* -------------------------------------------------
+           1. Validate input
+        ------------------------------------------------- */
+        var caseId = request.pathParams.case_id;
+        var body = request.body.data;
+
+        if (!caseId) {
+            response.setStatus(400);
+            response.setBody({ error: "Case ID is required" });
+            return;
+        }
+
+        if (!body || (!body.work_notes && !body.fields)) {
+            response.setStatus(400);
+            response.setBody({ error: "No updates provided" });
+            return;
+        }
+
+        /* -------------------------------------------------
+           2. Load Incident
+        ------------------------------------------------- */
+        var gr = new GlideRecord('incident');
+        gr.addQuery('number', caseId);
+        gr.query();
+
+        if (!gr.next()) {
+            response.setStatus(404);
+            response.setBody({
+                error: "Incident not found",
+                number: caseId
+            });
+            return;
+        }
+
+        var currentState = gr.getValue('state');
+        var updated = [];
+
+        /* -------------------------------------------------
+           3. Resolved / Closed guard (work_notes only)
+        ------------------------------------------------- */
+        if (currentState === '6' || currentState === '7') {
+
+            if (body.work_notes) {
+                gr.work_notes = body.work_notes;
+                updated.push('work_notes');
+
+                gr.update();
+
+                response.setStatus(200);
+                response.setBody({
+                    success: true,
+                    number: caseId,
+                    message: "Work notes added. Incident already resolved.",
+                    current_state: currentState
+                });
+                return;
+            }
+
+            response.setStatus(409);
+            response.setBody({
+                error: "Incident already resolved",
+                current_state: currentState
+            });
+            return;
+        }
+
+        /* -------------------------------------------------
+           4. Work notes (journal field)
+        ------------------------------------------------- */
+        if (body.work_notes) {
+            gr.work_notes = body.work_notes;
+            updated.push('work_notes');
+        }
+
+        /* -------------------------------------------------
+           5. Field updates with sequential state transitions
+        ------------------------------------------------- */
+        if (body.fields && typeof body.fields === 'object') {
+
+            var targetState = body.fields.state;
+
+            /* ---- Handle Resolve (6) or Close (7) with sequential transitions ---- */
+            if (targetState === '6' || targetState === '7') {
+                // Don't allow state changes if already resolved/closed
+                if (currentState === '6' || currentState === '7') {
+                    // Already resolved/closed - skip state change
+                } else {
+                    // Enforce valid state transitions: New (1) -> In Progress (2) -> Resolved (6) -> Closed (7)
+                    // If current state is New (1) and target is Resolved (6) or Closed (7),
+                    // first transition to In Progress (2)
+                    if (currentState === '1') {
+                        // Step 1: Transition from New to In Progress
+                        gr.setValue('state', '2');
+                        var step1Update = gr.update();
+                        if (!step1Update) {
+                            response.setStatus(500);
+                            response.setBody({
+                                error: "Failed to transition from 'New' to 'In Progress'",
+                                current_state: currentState,
+                                attempted_state: '2'
+                            });
+                            return;
+                        }
+                        // Reload to get updated state
+                        gr.get(gr.getUniqueValue());
+                        currentState = gr.getValue('state');
+                        // Re-apply work notes after reload (they get cleared)
+                        if (body.work_notes) {
+                            gr.work_notes = body.work_notes;
+                        }
+                        // Track intermediate transition (but don't add 'state' to updated - we'll track final state)
+                    }
+                    
+                    // Step 2: Now transition to Resolved (6) if that's the target
+                    if (targetState === '6' && currentState !== '6' && currentState !== '7') {
+                        // Set required fields for resolution
+                        gr.setValue(
+                            'close_code',
+                            body.fields.close_code || 'Solved (Permanently)'
+                        );
+                        updated.push('close_code');
+
+                        // Set resolution notes (close_notes) - required field
+                        if (body.fields.close_notes) {
+                            gr.setValue('close_notes', body.fields.close_notes);
+                            updated.push('close_notes');
+                        } else {
+                            // Set default resolution notes if not provided
+                            gr.setValue('close_notes', 'Resolved via IT Support Bot');
+                            updated.push('close_notes');
+                        }
+
+                        // Ensure caller is set (required field)
+                        // If caller is not set, use the API user (current user)
+                        if (!gr.caller_id || !gr.caller_id.toString()) {
+                            gr.caller_id = gs.getUserID();
+                            updated.push('caller_id');
+                        }
+
+                        gr.setValue('resolved_at', new GlideDateTime().getValue());
+                        updated.push('resolved_at');
+
+                        gr.setValue('state', '6');
+                        // Try to bypass workflow to allow state transition
+                        gr.setWorkflow(false);
+                        var step2Update = gr.update();
+                        if (!step2Update) {
+                            // Reload to see what the actual state is
+                            gr.get(gr.getUniqueValue());
+                            var actualState = gr.getValue('state');
+                            response.setStatus(500);
+                            response.setBody({
+                                error: "Failed to transition to 'Resolved'. ServiceNow business rules may be blocking this transition.",
+                                current_state: actualState,
+                                attempted_state: '6',
+                                hint: "Check ServiceNow business rules for incident state transitions. The incident may need to be assigned or have required fields set."
+                            });
+                            return;
+                        }
+                        // Reload to get updated state
+                        gr.get(gr.getUniqueValue());
+                        currentState = gr.getValue('state');
+                        // Re-apply work notes after reload (they get cleared)
+                        if (body.work_notes) {
+                            gr.work_notes = body.work_notes;
+                        }
+                        // Don't add 'state' to updated here - we'll track it separately
+                        // Note: close_code, close_notes, resolved_at, and caller_id are already saved
+                    }
+                    
+                    // Step 3: Transition to Closed (7) if that's the target
+                    // (Note: Can only close if already resolved)
+                    if (targetState === '7') {
+                        if (currentState === '6') {
+                            // Already resolved, can close
+                            gr.setValue(
+                                'close_code',
+                                body.fields.close_code || 'Solved (Permanently)'
+                            );
+                            updated.push('close_code');
+
+                            // Set resolution notes if not already set
+                            if (!gr.close_notes || !gr.close_notes.toString()) {
+                                if (body.fields.close_notes) {
+                                    gr.setValue('close_notes', body.fields.close_notes);
+                                } else {
+                                    gr.setValue('close_notes', 'Closed via IT Support Bot');
+                                }
+                                updated.push('close_notes');
+                            }
+
+                            // Ensure caller is set
+                            if (!gr.caller_id || !gr.caller_id.toString()) {
+                                gr.caller_id = gs.getUserID();
+                                updated.push('caller_id');
+                            }
+
+                            gr.setValue('closed_at', new GlideDateTime().getValue());
+                            updated.push('closed_at');
+
+                            gr.setValue('state', '7');
+                            gr.setWorkflow(false);
+                            var closeUpdate = gr.update();
+                            if (!closeUpdate) {
+                                response.setStatus(500);
+                                response.setBody({
+                                    error: "Failed to close incident",
+                                    current_state: currentState
+                                });
+                                return;
+                            }
+                            // Reload after close
+                            gr.get(gr.getUniqueValue());
+                            currentState = gr.getValue('state');
+                        } else if (currentState !== '7') {
+                            // Not resolved yet - resolve first, then close
+                            // Set required fields for resolution
+                            gr.setValue(
+                                'close_code',
+                                body.fields.close_code || 'Solved (Permanently)'
+                            );
+                            updated.push('close_code');
+
+                            // Set resolution notes
+                            if (body.fields.close_notes) {
+                                gr.setValue('close_notes', body.fields.close_notes);
+                            } else {
+                                gr.setValue('close_notes', 'Resolved via IT Support Bot');
+                            }
+                            updated.push('close_notes');
+
+                            // Ensure caller is set
+                            if (!gr.caller_id || !gr.caller_id.toString()) {
+                                gr.caller_id = gs.getUserID();
+                                updated.push('caller_id');
+                            }
+
+                            gr.setValue('resolved_at', new GlideDateTime().getValue());
+                            updated.push('resolved_at');
+
+                            gr.setValue('state', '6');
+                            gr.setWorkflow(false);
+                            var resolveUpdate = gr.update();
+                            if (!resolveUpdate) {
+                                response.setStatus(500);
+                                response.setBody({
+                                    error: "Failed to resolve incident before closing",
+                                    current_state: currentState
+                                });
+                                return;
+                            }
+                            // Reload after resolve
+                            gr.get(gr.getUniqueValue());
+                            currentState = gr.getValue('state');
+                            
+                            // Re-apply work notes after reload
+                            if (body.work_notes) {
+                                gr.work_notes = body.work_notes;
+                            }
+                            
+                            // Now close
+                            gr.setValue('closed_at', new GlideDateTime().getValue());
+                            updated.push('closed_at');
+                            gr.setValue('state', '7');
+                            gr.setWorkflow(false);
+                            var closeUpdate2 = gr.update();
+                            if (!closeUpdate2) {
+                                response.setStatus(500);
+                                response.setBody({
+                                    error: "Failed to close incident after resolving",
+                                    current_state: currentState
+                                });
+                                return;
+                            }
+                            // Reload after close
+                            gr.get(gr.getUniqueValue());
+                            currentState = gr.getValue('state');
+                        }
+                    }
+                }
+            }
+            
+            /* ---- Handle other state changes (non-Resolved/Closed) ---- */
+            else if (targetState) {
+                // For other state changes, set directly
+                if (currentState !== targetState) {
+                    gr.setValue('state', targetState);
+                    updated.push('state');
+                }
+            }
+
+            /* ---- Non-state fields ---- */
+            var allowed = [
+                'short_description',
+                'description',
+                'urgency',
+                'impact',
+                'priority',
+                'category',
+                'subcategory',
+                'close_notes'
+            ];
+
+            for (var i = 0; i < allowed.length; i++) {
+                var f = allowed[i];
+                if (body.fields[f] !== undefined) {
+                    var curr = gr.getValue(f);
+                    var incoming = body.fields[f];
+                    if (curr != incoming) {
+                        gr.setValue(f, incoming);
+                        updated.push(f);
+                    }
+                }
+            }
+        }
+
+        /* -------------------------------------------------
+           6. Final update (apply work notes and other fields if needed)
+        ------------------------------------------------- */
+        // State transitions were already saved with separate update() calls above
+        // Now apply work notes and other field changes if any
+        // Note: After reloads, work_notes need to be re-applied
+        var sysId = null;
+        var hasStateChange = (body.fields && body.fields.state);
+        
+        // Re-apply work notes if they exist (they get cleared after reloads)
+        if (body.work_notes) {
+            gr.work_notes = body.work_notes;
+        }
+        
+        if (updated.length > 0 || body.work_notes) {
+            // There are field changes or work notes to apply
+            sysId = gr.update();
+            if (!sysId) {
+                response.setStatus(500);
+                response.setBody({
+                    error: "Update failed",
+                    attempted_fields: updated
+                });
+                return;
+            }
+        } else if (hasStateChange) {
+            // Only state was changed - already updated in steps above
+            sysId = gr.getUniqueValue(); // Use existing sys_id
+        } else {
+            // No changes at all
+            response.setStatus(400);
+            response.setBody({
+                error: "No updates provided"
+            });
+            return;
+        }
+        
+        // Track state change in updated_fields for response
+        if (hasStateChange && updated.indexOf('state') === -1) {
+            updated.push('state');
+        }
+        
+        response.setStatus(200);
+        response.setBody({
+            success: true,
+            number: caseId,
+            sys_id: sysId,
+            updated_fields: updated
+        });
+
+    } catch (e) {
+        response.setStatus(500);
+        response.setBody({
+            error: "Internal server error",
+            message: e.message || e.toString()
+        });
+    }
+})(request, response);
+]]></operation_script>
+        <operation_uri>/api/x_1894676_asiapa_0/it_bot/incident/{case_id}</operation_uri>
+        <produces>application/json,application/xml,text/xml</produces>
+        <produces_customized>false</produces_customized>
+        <relative_path>/incident/{case_id}</relative_path>
+        <request_example/>
+        <requires_acl_authorization>false</requires_acl_authorization>
+        <requires_authentication>true</requires_authentication>
+        <requires_snc_internal_role>true</requires_snc_internal_role>
+        <short_description/>
+        <sys_class_name>sys_ws_operation</sys_class_name>
+        <sys_created_by>admin</sys_created_by>
+        <sys_created_on>2026-01-12 02:57:56</sys_created_on>
+        <sys_id>b8b0514f8352321010fac7e0deaad351</sys_id>
+        <sys_mod_count>18</sys_mod_count>
+        <sys_name>Update Incident</sys_name>
+        <sys_package display_value="Asiapac IT Bot" source="x_1894676_asiapa_0">da15edbd8392f61010fac7e0deaad3fe</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="Asiapac IT Bot">da15edbd8392f61010fac7e0deaad3fe</sys_scope>
+        <sys_update_name>sys_ws_operation_b8b0514f8352321010fac7e0deaad351</sys_update_name>
+        <sys_updated_by>admin</sys_updated_by>
+        <sys_updated_on>2026-01-15 08:27:01</sys_updated_on>
+        <web_service_definition display_value="IT BOT API">a23565fd8392f61010fac7e0deaad359</web_service_definition>
+        <web_service_version/>
+    </sys_ws_operation>
+</record_update>

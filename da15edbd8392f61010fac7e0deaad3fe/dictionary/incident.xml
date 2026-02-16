@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?><database>
+    <element attributes="email_client=true,hasWorkflow=true,live_feed=true,all_tables.query_hints=true" audit="true" db_object_id="efaf6176f1f322108bb2efdbde054cd0" extends="task" label="Incident" max_length="40" name="incident" text_index="true" type="collection">
+        <element label="Reported Email" max_length="100" name="x_1894676_asiapa_0_u_reported_email" type="string"/>
+        <element label="Reported Name" max_length="100" name="x_1894676_asiapa_0_u_reported_name" type="string"/>
+    </element>
+</database>
